@@ -1,8 +1,10 @@
-from odoo import models
+import json
 import locale
 from datetime import datetime
-from odoo.tools import float_round
-import json
+
+from odoo.exceptions import UserError
+
+from odoo import models
 
 
 class PartnerXlsx(models.AbstractModel):
@@ -11,526 +13,222 @@ class PartnerXlsx(models.AbstractModel):
     _description = "Report xlsx"
 
     def generate_xlsx_report(self, workbook, data, partners):
-
-        ############## Get nessesary values
-        partner = data["partner_id"]
-        debit_start_balance = self.env["account.move.line"].search(
-            [
-                ("display_type", "not in", ("line_section", "line_note")),
-                ("partner_id", "=", partner),
-                ("move_id.state", "=", "posted"),
-                ("account_id.internal_type", "=", "receivable"),
-                ("full_reconcile_id", "=", False),
-                ("balance", "!=", 0),
-                ("account_id.reconcile", "=", True),
-                ("date", "<=", data["start_date"]),
-            ]
-        )
-        if debit_start_balance:
-            debit_start_balance = debit_start_balance.with_context(
-                order_cumulated_balance="date desc, move_name desc, id, id"
-            )[0].cumulated_balance
-        else:
-            debit_start_balance = 0
-        credit_start_balance = self.env["account.move.line"].search(
-            [
-                ("display_type", "not in", ("line_section", "line_note")),
-                ("partner_id", "=", partner),
-                ("move_id.state", "=", "posted"),
-                ("account_id.internal_type", "=", "payable"),
-                ("full_reconcile_id", "=", False),
-                ("balance", "!=", 0),
-                ("account_id.reconcile", "=", True),
-                ("date", "<=", data["start_date"]),
-            ]
-        )
-        if credit_start_balance:
-            credit_start_balance = credit_start_balance.with_context(
-                order_cumulated_balance="date desc, move_name desc, id, id"
-            )[0].cumulated_balance
-        else:
-            credit_start_balance = 0
-        ##############
-
         locale.setlocale(locale.LC_ALL, "ru_RU.UTF-8")
 
-        ############## Styles defenition
-        sheet = workbook.add_worksheet("Акт сверки")
-        bold = workbook.add_format({"bold": True})
-        end_date_cell = workbook.add_format(
-            {
-                "align": "center",
-                "valign": "vcenter",
-                "bottom": 2,
-            }
+        # CHECK WAYBILLS
+        _data = {
+            "data": data,
+            "workbook": workbook,
+            "sheet": workbook.add_worksheet("Акт сверки"),
+            "start_date": datetime.strptime(data["start_date"], "%Y-%m-%d"),
+            "end_date": datetime.strptime(data["end_date"], "%Y-%m-%d"),
+            "c_line": 6,
+        }
+
+        waybills = sorted(
+            filter(lambda x: x["state"] != "cancel", self.check_waybills(_data)),
+            key=lambda x: x["date_waybill"]
         )
-        bold_centre = workbook.add_format(
+
+        self.print_act_head(_data)
+
+        self.print_balances(_data, _data["start_date"])  # start balance
+
+        self.print_waybills_and_invoices(_data, waybills)
+
+        self.print_balances(_data, _data["end_date"])  # end balance
+
+    def check_waybills(self, data):
+        domain = [
+            ("partner_id", "=", data["data"]["partner_id"]),
+            ("date_waybill", ">=", data["start_date"]),
+            ("date_waybill", "<=", data["end_date"]),
+        ]
+        waybills = self.env["stock.waybill"].search_read(domain)
+        if waybills:
+            return waybills
+        raise UserError("Накладные отсутсвуют для данного контрагента")
+
+    def print_act_head(self, data):
+        bold_white_borders = data["workbook"].add_format(
             {
                 "bold": True,
                 "align": "center",
-                "valign": "vcenter",
-            }
-        )
-        italic = workbook.add_format(
-            {
-                "italic": True,
-                "align": "center",
-                "valign": "vcenter",
-                "font_name": "Arial",
-                "font_size": 12,
-            }
-        )
-        saldo_cell = workbook.add_format(
-            {
-                "italic": True,
-                "align": "center",
-                "valign": "vcenter",
-                "bottom": 2,
-            }
-        )
-        saldo_cell_right = workbook.add_format(
-            {
-                "italic": True,
-                "align": "center",
-                "valign": "vcenter",
-                "bottom": 2,
-                "right": 2,
-            }
-        )
-        debit_merge = workbook.add_format(
-            {
-                "bold": True,
-                "align": "center",
-                "valign": "vcenter",
-                "top": 2,
-                "left": 2,
-                "right": 2,
-                "bottom": 1,
-            }
-        )
-        blue_underlined = workbook.add_format(
-            {
-                "align": "center",
-                "valign": "vcenter",
-                "font_color": "blue",
-                "underline": True,
-            }
-        )
-        centre = workbook.add_format(
-            {
-                "align": "center",
-                "valign": "vcenter",
-            }
-        )
-        right_align = workbook.add_format(
-            {
-                "align": "right",
-                "valign": "vright",
-            }
-        )
-        cell_format = workbook.add_format(
-            {
-                "font_name": "Arial",
-                "font_size": 12,
-                "align": "center",
-                "valign": "vcenter",
-                "border": 1,
-            }
-        )
-        byn_cell = workbook.add_format(
-            {
-                "font_name": "Arial",
-                "font_size": 12,
-                "align": "center",
-                "valign": "vcenter",
-                "right": 2,
                 "top": 1,
+                "right": 1,
                 "left": 1,
-                "bottom": 1,
+                "top_color": "#FFFFFF",  # White
+                "right_color": "#FFFFFF",  # White
+                "left_color": "#FFFFFF",  # White
+
             }
         )
-        empty_bottom_cells = workbook.add_format({"bottom": 2})
-        empty_bottom_right_cells = workbook.add_format({"bottom": 2, "right": 2})
-        empty_right_cells = workbook.add_format({"right": 2})
-        empty_left_cells = workbook.add_format({"left": 2})
-        ##############
-
-        right_cells = workbook.add_format(
+        regular_center = data["workbook"].add_format(
             {
-                "right": 2,
-                "align": "right",
-                "valign": "vright",
+                "align": "center",
+                "valign": "vcenter",
             }
         )
-        sheet.merge_range(
-            "A1:J1",
-            f"АКТ сверки взаимных расчетов между {self.env.company.name}"
-            f" и {data['parnter_name']} по состоянию на {data['end_date']}",
-            bold,
+
+        data["sheet"].merge_range(
+            "A1:L1",
+            f"АКТ",
+            bold_white_borders,
         )
-        start_date = datetime.strptime(data["start_date"], "%Y-%m-%d")
-        sheet.merge_range("A2:E2", "ДЕБЕТ", debit_merge)
-        sheet.merge_range("F2:J2", "КРЕДИТ", debit_merge)
-        sheet.write(2, 0, "Дата", cell_format)
-        sheet.write(
-            3,
-            0,
-            f"{start_date.day:02d}.{start_date.month:02d}.{start_date.year}",
-            centre,
+        data["sheet"].merge_range(
+            "A2:L2",
+            f"сверки взаимных расчетов между",
+            bold_white_borders,
+        )
+        data["sheet"].merge_range(
+            "A3:L3",
+            f"{self.env.company.name} и {data['data']['parnter_name']}",
+            bold_white_borders,
+        )
+        data["sheet"].merge_range(
+            "A4:L4",
+            f"по состоянию на {data['end_date'].strftime('%d.%m.%Y')}",
+            bold_white_borders,
         )
 
-        usd = self.env["res.currency"].search([("name", "=", "USD")])
-        byn_balance = usd._convert(
-            debit_start_balance,
-            self.env["res.currency"].browse(data["currency_id"]),
-            self.env.user.company_id,
-            start_date,
+        data["sheet"].merge_range(
+            "A5:F5",
+            f"{self.env.company.name} {data['data']['currency_name']}",
+            regular_center,
+        )
+        data["sheet"].merge_range(
+            "G5:L5",
+            f"{data['data']['parnter_name']} {data['data']['currency_name']}",
+            regular_center,
         )
 
-        sheet.merge_range("B3:C3", "Операция", cell_format)
-        sheet.write(3, 1, "Сальдо", italic)
-        sheet.write(3, 3, f"{float(debit_start_balance)} $", right_align)
-        sheet.write(3, 4, f"{byn_balance} Br", right_cells)
-        sheet.write(2, 1, "", cell_format)
-        sheet.write(2, 7, "", cell_format)
-        # sheet.write(3, 4, "", empty_right_cells)
-        sheet.write(4, 4, "", empty_right_cells)
-        sheet.write(3, 9, "", empty_right_cells)
-        sheet.write(4, 9, "", empty_right_cells)
-        sheet.write(2, 3, "Сумма", cell_format)
-        sheet.write(2, 4, "Сумма в BYN", byn_cell)
-        sheet.write(2, 5, "Дата", cell_format)
-        sheet.write(
-            3,
-            5,
-            f"{start_date.day:02d}.{start_date.month:02d}.{start_date.year}",
-            centre,
-        )
+        data["sheet"].write("A6", "Дата", regular_center)
+        data["sheet"].merge_range("B6:D6", "Операция/Документ", regular_center)
+        data["sheet"].write("E6", "Дебет", regular_center)
+        data["sheet"].write("F6", "Кредит", regular_center)
 
-        usd = self.env["res.currency"].search([("name", "=", "USD")])
-        byn_balance = usd._convert(
-            credit_start_balance,
-            self.env["res.currency"].browse(data["currency_id"]),
-            self.env.user.company_id,
-            start_date,
-        )
+        data["sheet"].write("G6", "Дата", regular_center)
+        data["sheet"].merge_range("H6:J6", "Операция/Документ", regular_center)
+        data["sheet"].write("K6", "Дебет", regular_center)
+        data["sheet"].write("L6", "Кредит", regular_center)
 
-        sheet.merge_range("G3:H3", "Операция", cell_format)
-        sheet.write(3, 6, "Сальдо", italic)
-        sheet.write(3, 8, f"{float(credit_start_balance)} $", right_align)
-        sheet.write(3, 9, f"{byn_balance} Br", right_cells)
-        sheet.write(2, 8, "Сумма", cell_format)
-        sheet.write(2, 9, "Сумма в BYN", byn_cell)
-        base_url = (
-            self.env["ir.config_parameter"].sudo().get_param("web.base.url").rstrip("/")
-        )
-        row = 5
-        credit_rows = 5
-        col = 0
-        spare_between = 0
-        pp_rows = 5
-        inv_rows = 6
-        pp_rows_increase = 0
-        inv_rows_increase = 0
-        g_cell = 7
-        c_cell = 6
-        sum_debit = 0
-        sum_credit = 0
-        byn = self.env["res.currency"].search(
-            [("name", "=", "BYN")],
-        )
-        currency_wizard = self.env["res.currency"].search(
-            [("name", "=", data["currency_name"])],
-        )
-        unique_invoices = []
-        right_items = []
-        for waybill in reversed(data["waybills"]):
-            sale_order = self.env["sale.order"].search(
-                [("id", "=", waybill["sale_order_id"][0])]
-            )
-            not_unique_invoices = sale_order.invoice_ids.filtered(
-                lambda x: x.amount_total > 0
-            )
+    def get_balance(self, data, internal_type, date):
+        balance = self.env["account.move.line"].search(
             [
-                right_items.append(invoice)
-                for invoice in not_unique_invoices
-                if invoice not in unique_invoices
+                ("display_type", "not in", ("line_section", "line_note")),
+                ("partner_id", "=", data["data"]["partner_id"]),
+                ("move_id.state", "=", "posted"),
+                ("account_id.internal_type", "=", internal_type),
+                ("full_reconcile_id", "=", False),
+                ("balance", "!=", 0),
+                ("account_id.reconcile", "=", True),
+                ("date", "<=", date),
             ]
+        )
+        if balance:
+            balance = balance.with_context(
+                order_cumulated_balance="date desc, move_name desc, id, id"
+            )[0].cumulated_balance
+        else:
+            balance = 0
+        return balance
 
-        right_column_items = sum(
-            list(
-                map(
-                    lambda x: len(json.loads(x.invoice_payments_widget)["content"]),
-                    right_items,
-                )
-            )
+    def print_balances(self, data, date, ):
+
+        regular_left = data["workbook"].add_format(
+            {
+                "align": "left",
+                "valign": "vcenter",
+            }
+        )
+        regular_right = data["workbook"].add_format(
+            {
+                "align": "right",
+                "valign": "vcenter",
+            }
         )
 
-        l = max(len(data["waybills"]), right_column_items) * 2 + 1
+        debit_start_balance = self.get_balance(data, "receivable", date)
 
-        for i in range(5, 5 + l):
-            sheet.write(
-                i,
-                col,
-                "",
-                empty_left_cells,
-            )
-            sheet.write(
-                i,
-                col + 4,
-                "",
-                empty_right_cells,
-            )
-            sheet.write(
-                i,
-                col + 9,
-                "",
-                empty_right_cells,
-            )
+        credit_start_balance = self.get_balance(data, "payable", date)
 
-        for waybill in reversed(data["waybills"]):
-            sale_order = self.env["sale.order"].search(
-                [("id", "=", waybill["sale_order_id"][0])]
-            )
-            not_unique_invoices = sale_order.invoice_ids.filtered(
-                lambda x: x.amount_total > 0
-            )
-            [
-                unique_invoices.append(invoice)
-                for invoice in not_unique_invoices
-                if invoice not in unique_invoices
-            ]
+        data["sheet"].write(data["c_line"], 0, date.strftime('%d.%m.%Y'), regular_left)
+        data["sheet"].merge_range(data["c_line"], 1, data["c_line"], 3, "Сальдо", regular_left)
 
-            waybill_date = datetime.strptime(waybill["date_waybill"], "%Y-%m-%d")
-            sheet.write(
-                row + spare_between,
-                col,
-                f"{waybill_date.day:02d}.{waybill_date.month:02d}.{waybill_date.year}",
-                centre,
-            )
-            if waybill["bill_type_id"] == "tn":
-                sheet.write(row + spare_between, col + 1, "ТН", centre)
+        data["sheet"].write(data["c_line"], 6, date.strftime('%d.%m.%Y'), regular_left)
+        data["sheet"].merge_range(data["c_line"], 7, data["c_line"], 9, "Сальдо", regular_left)
+
+        data["sheet"].write(data["c_line"], 4, debit_start_balance, regular_right)
+        data["sheet"].write(data["c_line"], 5, credit_start_balance, regular_right)
+        data["c_line"] += 1
+
+    def print_waybills_and_invoices(self, data, waybills):
+        regular_right = data["workbook"].add_format(
+            {
+                "align": "right",
+                "valign": "vcenter",
+            }
+        )
+        regular_left = data["workbook"].add_format(
+            {
+                "align": "left",
+                "valign": "vcenter",
+            }
+        )
+        # c MEANS OUR COMPANY
+        c_date_row = 0  # A row
+        c_operation_row = 1  # B row
+        c_debit_row = 4  # E row
+        c_credit_row = 5  # F row
+        filtered_invoices = []
+        payment_ids = []
+        for waybill in waybills:
+            data["sheet"].write(data["c_line"], c_date_row, waybill["date_waybill"].strftime('%d.%m.%Y'), regular_left)
+            if waybill['bill_type_id'] == 'ttn':
+                data["sheet"].merge_range(data["c_line"], c_operation_row, data["c_line"], c_operation_row + 2,
+                                          f"TTH {waybill['number']}", regular_left)
             else:
-                sheet.write(row + spare_between, col + 1, "ТТН", centre)
-            link_waybill = f'{base_url}/web#id={waybill["id"]}&action=425&model=stock.waybill&view_type=form&cids=&menu_id=220"'
-            sheet.write_url(
-                f"C{c_cell}",
-                f"{link_waybill}",
-                blue_underlined,
-                string=f'{waybill["series"]} {waybill["number"]} (по счету {waybill["sale_order_id"][1]})',
+                data["sheet"].merge_range(data["c_line"], c_operation_row, data["c_line"], c_operation_row + 2,
+                                          f"TH {waybill['number']}", regular_left)
+            data["sheet"].write(data["c_line"], c_credit_row, waybill["amount_total"], regular_right)
+            data["c_line"] += 1
+
+            sale_order = self.env["sale.order"].search(
+                [("id", "=", waybill["sale_order_id"][0])]
             )
-            sheet.write(
-                row + spare_between,
-                col + 3,
-                f"{round(waybill['amount_total'],2)} $",
-                right_align,
+            not_filtered_invoices = sale_order.invoice_ids.filtered(
+                lambda x: x.amount_total > 0
             )
-            sheet.write(
-                row + spare_between,
-                col + 4,
-                f"{round(waybill['amount_total_byn'], 2)} Br",
-                right_cells,
-            )
-            sheet.write(
-                row + spare_between + 1,
-                col + 4,
-                "",
-                empty_right_cells,
-            )
-            spare_between += 1
-            row += 1
-            c_cell += 2
-        for invoice in unique_invoices:
-            payments_widget = invoice.invoice_payments_widget
-            if payments_widget != "false":
-                payments_details = json.loads(payments_widget)
-                for i in range(len(payments_details["content"])):
-                    payments = self.env["account.payment"].search(
-                        [
-                            (
-                                "id",
-                                "=",
-                                payments_details["content"][i]["account_payment_id"],
-                            ),
-                        ]
-                    )
-                    rate_byn = self.env["res.currency.rate"].search(
-                        [
-                            ("currency_id", "=", byn.id),
-                            ("name", "=", payments.date),
-                        ]
-                    )
-                    total_byn = float_round(
-                        float(payments_details["content"][i]["amount"]) * rate_byn.rate,
-                        2,
-                    )
-                    date_payment = datetime.strptime(
-                        payments_details["content"][i]["date"], "%Y-%m-%d"
-                    )
-                    sheet.write(
-                        inv_rows + inv_rows_increase,
-                        col + 5,
-                        f"{date_payment.day:02d}.{date_payment.month:02d}.{date_payment.year}",
-                        centre,
-                    )
-                    sheet.write(
-                        pp_rows + pp_rows_increase,
-                        col + 6,
-                        f"ПП",
-                        bold_centre,
-                    )
-                    link = f'{base_url}/web#id={invoice.id}&action=206&active_id=528&model=account.move&view_type=form&cids=&menu_id=174"'
-                    sheet.write_url(
-                        f"G{g_cell}",
-                        f"{link}",
-                        blue_underlined,
-                        string=invoice.name,
-                    )
-                    sheet.write(
-                        inv_rows + inv_rows_increase,
-                        col + 7,
-                        payments.name,
-                        bold,
-                    )
-                    amount = float_round(
-                        float(payments_details["content"][i]["amount"]), 2
-                    )
-                    sum_credit += amount
-                    sheet.write(
-                        inv_rows + inv_rows_increase,
-                        col + 8,
-                        f"{round(amount, 2)} {payments_details['content'][i]['currency']}",
-                        right_align,
-                    )
-                    sheet.write(
-                        inv_rows + inv_rows_increase,
-                        col + 9,
-                        f"{round(total_byn, 2)} Br",
-                        right_cells,
-                    )
-                    sheet.write(
-                        inv_rows + inv_rows_increase + 1,
-                        col + 9,
-                        "",
-                        empty_right_cells,
-                    )
-                    credit_rows += 1
-                    pp_rows_increase += 2
-                    inv_rows_increase += 2
-                    g_cell += 2
-
-        last_row_index = max([row + spare_between, inv_rows + inv_rows_increase])
-
-        end_date = datetime.strptime(data["end_date"], "%Y-%m-%d")
-        sheet.write(
-            last_row_index,
-            col,
-            f"{end_date.day:02d}.{end_date.month:02d}.{end_date.year}",
-            end_date_cell,
-        )
-        sheet.write(
-            last_row_index,
-            col + 5,
-            f"{end_date.day:02d}.{end_date.month:02d}.{end_date.year}",
-            end_date_cell,
-        )
-        sheet.write(
-            last_row_index,
-            col + 2,
-            "",
-            empty_bottom_cells,
-        )
-        sheet.write(
-            last_row_index,
-            col + 3,
-            "",
-            empty_bottom_cells,
-        )
-        sheet.write(
-            last_row_index,
-            col + 4,
-            "",
-            empty_bottom_right_cells,
-        )
-
-        debit_end_balance = self.env["account.move.line"].search(
-            [
-                ("display_type", "not in", ("line_section", "line_note")),
-                ("partner_id", "=", partner),
-                ("move_id.state", "=", "posted"),
-                ("account_id.internal_type", "=", "receivable"),
-                ("full_reconcile_id", "=", False),
-                ("balance", "!=", 0),
-                ("account_id.reconcile", "=", True),
-                ("date", "<=", data["end_date"]),
-            ]
-        )
-        if debit_end_balance:
-            debit_end_balance = debit_end_balance.with_context(
-                order_cumulated_balance="date desc, move_name desc, id, id"
-            )[0].cumulated_balance
-        else:
-            debit_end_balance = 0
-        usd = self.env["res.currency"].search([("name", "=", "USD")])
-        end_debit_byn_balance = usd._convert(
-            debit_end_balance,
-            self.env["res.currency"].browse(data["currency_id"]),
-            self.env.user.company_id,
-            end_date,
-        )
-        credit_end_balance = self.env["account.move.line"].search(
-            [
-                ("display_type", "not in", ("line_section", "line_note")),
-                ("partner_id", "=", partner),
-                ("move_id.state", "=", "posted"),
-                ("account_id.internal_type", "=", "payable"),
-                ("full_reconcile_id", "=", False),
-                ("balance", "!=", 0),
-                ("account_id.reconcile", "=", True),
-                ("date", "<=", data["end_date"]),
-            ]
-        )
-        if credit_end_balance:
-            credit_end_balance = credit_end_balance.with_context(
-                order_cumulated_balance="date desc, move_name desc, id, id"
-            )[0].cumulated_balance
-        else:
-            credit_end_balance = 0
-        end_credit_byn_balance = usd._convert(
-            credit_end_balance,
-            self.env["res.currency"].browse(data["currency_id"]),
-            self.env.user.company_id,
-            end_date,
-        )
-
-        sheet.write(last_row_index, col + 1, "Сальдо", saldo_cell)
-        sheet.write(
-            last_row_index, col + 3, f"{float(debit_end_balance)} $", saldo_cell
-        )
-        sheet.write(
-            last_row_index, col + 4, f"{end_debit_byn_balance} Br", saldo_cell_right
-        )
-
-        sheet.write(last_row_index, col + 6, "Сальдо", saldo_cell)
-        sheet.write(
-            last_row_index, col + 8, f"{float(credit_end_balance)} $", saldo_cell
-        )
-        sheet.write(
-            last_row_index,
-            col + 9,
-            f"{float(end_credit_byn_balance)} Br",
-            saldo_cell_right,
-        )
-        sheet.write(
-            last_row_index,
-            col + 7,
-            "",
-            empty_bottom_cells,
-        )
-        sheet.set_column("A:A", 10)
-        sheet.set_column("D:D", 10)
-        sheet.set_column("E:E", 12.5)
-
-        sheet.set_column("F:F", 10)
-        sheet.set_column("I:I", 10)
-        sheet.set_column("J:J", 12.5)
+            for invoice in not_filtered_invoices:
+                if invoice not in filtered_invoices:
+                    filtered_invoices.append(invoice)
+                    payments_widget = invoice.invoice_payments_widget
+                    if payments_widget != "false":
+                        for payment in json.loads(payments_widget)["content"]:
+                            payment_info = {
+                                "move_id": payment["move_id"],
+                                "amount": payment["amount"],
+                                "date": payment["date"]
+                            }
+                            if payment_info not in payment_ids:
+                                payment_ids.append(payment_info)
+                                payment = self.env["account.move"].search(
+                                    [
+                                        (
+                                            "id",
+                                            "=",
+                                            payment_info["move_id"],
+                                        ),
+                                    ]
+                                )
+                                data["sheet"].write(data["c_line"], c_date_row,
+                                                    datetime.
+                                                    strptime(payment_info["date"], "%Y-%m-%d").
+                                                    strftime("%d.%m.%Y"),
+                                                    regular_left
+                                                    )
+                                data["sheet"].merge_range(data["c_line"], c_operation_row, data["c_line"],
+                                                          c_operation_row + 2, payment.name, regular_left
+                                                          )
+                                data["sheet"].write(data["c_line"], c_debit_row, payment_info["amount"], regular_right)
+                                data["c_line"] += 1
